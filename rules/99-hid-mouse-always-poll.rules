@@ -1,0 +1,10 @@
+# Fix: ASMedia ASM1042A Transaction Translator idle stall for USB mice.
+# Keeps the HID interrupt pipe open by holding /dev/hidrawX with a persistent
+# cat process. Works generically for any boot-class HID mouse (protocol 0x02).
+# Note: restricting this rule to ASMedia controllers via ATTRS{vendor}/ATTRS{device}
+# is not possible here because udev's ATTRS parent walk does not reliably cross from the
+# hidraw/HID subsystem all the way to the PCI controller. The rule is therefore
+# system-wide for boot-class mice; the overhead is negligible (one cat process per mouse).
+# The cat process exits automatically on device removal (EOF).
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{bInterfaceProtocol}=="02", \
+    RUN+="/bin/systemd-run --no-block --unit=hid-poll-%k --collect /bin/cat /dev/%k"
