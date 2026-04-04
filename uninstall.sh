@@ -4,6 +4,8 @@
 set -e
 
 UDEV_DIR="/etc/udev/rules.d"
+LIB_DIR="/usr/local/lib/asmedia-usb-mouse-fix"
+SYSTEMD_DIR="/etc/systemd/system"
 
 if [[ $EUID -ne 0 ]]; then
     echo "Run as root: sudo ./uninstall.sh" >&2
@@ -19,6 +21,15 @@ if [[ -n "$UNITS" ]]; then
     echo "Stopping hid-poll units..."
     systemctl stop "$UNITS" 2>/dev/null || true
 fi
+
+# Disable and remove boot service
+if systemctl is-enabled asmedia-usb-mouse-fix.service &>/dev/null; then
+    systemctl disable asmedia-usb-mouse-fix.service
+fi
+rm -f "$SYSTEMD_DIR/asmedia-usb-mouse-fix.service"
+rm -rf "$LIB_DIR"
+systemctl daemon-reload
+echo "Removed: asmedia-usb-mouse-fix.service"
 
 # Remove udev rules
 RULES=(

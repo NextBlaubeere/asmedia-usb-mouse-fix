@@ -1,6 +1,6 @@
 # ASMedia ASM1042A USB Mouse Fix for Linux
 
-Fixes USB mice that do not respond when connected through a monitor containing an **ASMedia ASM1042A** USB 3.0 host controller via **Thunderbolt 2**. The fix is a single udev rule, requires no reboot on most systems, and works generically for any USB mouse without needing to know the mouse's vendor or product ID.
+Fixes USB mice that do not respond when connected through a monitor containing an **ASMedia ASM1042A** USB 3.0 host controller via **Thunderbolt 2**. The fix consists of a udev rule and a small boot service, requires no reboot on most systems, and works generically for any USB mouse without needing to know the mouse's vendor or product ID.
 
 This issue has been observed on a **MacBook Pro 13" Early 2015 (MacBookPro12,1)** with an LG UltraWide monitor connected via Thunderbolt 2. Interestingly, connecting the same monitor to a desktop PC via its USB port works fine. The problem only appears when the monitor is connected via Thunderbolt 2, which points to the Thunderbolt bridge itself as a contributing factor rather than the ASMedia chip alone.
 
@@ -76,19 +76,23 @@ How to add a kernel parameter depends on your bootloader and distribution.
 
 **Limitation:** This requires the exact vendor and product ID of every mouse you want to fix. There is no wildcard support in the kernel for this parameter. If you use multiple mice or switch mice, you need a separate entry for each one.
 
-### Option 2: Udev Rule (generic)
+### Option 2: Udev Rule and Boot Service (generic)
 
 This repository implements the same fix generically, without touching the kernel command line and without knowing the mouse's vendor or product ID in advance.
 
 When a mouse connects and its `/dev/hidrawX` node appears, a udev rule fires and immediately starts a `cat /dev/hidrawX` process in the background. Holding a file descriptor open on the hidraw device causes the usbhid driver to keep the interrupt pipe continuously active, exactly as `HID_QUIRK_ALWAYS_POLL` does. The TT never sees an idle pipe. When the mouse is disconnected, `cat` receives EOF and exits automatically.
 
-The process is managed by systemd as a transient unit (`--collect` ensures it is cleaned up automatically on exit). No permanent service is installed.
+The process is managed by systemd as a transient unit (`--collect` ensures it is cleaned up automatically on exit).
+
+However, on reboot the udev rule alone is not enough. The mouse stops working until it is replugged or power-cycled manually. I am not sure why exactly, but the most likely explanation is that during early boot the USB device re-enumerates, which briefly kills the first `cat` process. There may be a gap of a few seconds before the device comes back and the rule fires again, and if the TT stalls during that gap the second `cat` process starts too late.
+
+To handle this, a small oneshot systemd service runs after udev has settled on every boot. It power-cycles all connected USB mice, forcing a clean re-enumeration at a point where udev is fully ready. This reliably fixes the cold boot issue.
 
 ---
 
-## The Rule
+## What Gets Installed
 
-One file is installed: `/etc/udev/rules.d/99-hid-mouse-always-poll.rules`
+**`/etc/udev/rules.d/99-hid-mouse-always-poll.rules`**
 
 ```
 ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{bInterfaceProtocol}=="02", \
@@ -98,6 +102,14 @@ ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{bInterfaceProtocol}=="02", \
 `bInterfaceProtocol == 0x02` is the standard USB HID descriptor value for a boot-class mouse (defined in the USB HID specification, section 4.1). This matches any USB mouse regardless of brand or model.
 
 The rule intentionally applies to all boot-class mice on the system, not only mice behind the ASMedia controller. Scoping it to the ASMedia controller is not straightforward: udev's `ATTRS` parent walk does not reliably cross from the hidraw/HID subsystem up to the PCI controller. In practice the overhead is negligible: one lightweight `cat` process per connected mouse.
+
+**`/etc/systemd/system/asmedia-usb-mouse-fix.service`**
+
+A oneshot systemd service that runs after udev has settled on every boot. It power-cycles all connected USB mice to ensure the udev rule fires at a point where the system is fully ready, working around the re-enumeration gap described above.
+
+**`/usr/local/lib/asmedia-usb-mouse-fix/hid-powercycle.sh`**
+
+The script called by the boot service to perform the power-cycle.
 
 ---
 
@@ -113,7 +125,8 @@ The installer:
 
 1. Copies the udev rule to `/etc/udev/rules.d/`
 2. Reloads udev rules
-3. Power-cycles all currently connected USB mice so the fix takes effect immediately without a physical replug
+3. Installs and enables the boot service
+4. Power-cycles all currently connected USB mice so the fix takes effect immediately without a physical replug
 
 No reboot required on most systems.
 

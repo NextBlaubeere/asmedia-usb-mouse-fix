@@ -1,0 +1,12 @@
+[Unit]
+Description=Power-cycle USB mice for ASMedia USB mouse fix
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/asmedia-usb-mouse-fix/hid-powercycle.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

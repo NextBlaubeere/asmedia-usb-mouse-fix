@@ -3,8 +3,13 @@
 
 set -e
 
-RULES_DIR="$(dirname "$(realpath "$0")")/rules"
+REPO_DIR="$(dirname "$(realpath "$0")")"
+RULES_DIR="$REPO_DIR/rules"
+SCRIPTS_DIR="$REPO_DIR/scripts"
+SERVICES_DIR="$REPO_DIR/services"
 UDEV_DIR="/etc/udev/rules.d"
+LIB_DIR="/usr/local/lib/asmedia-usb-mouse-fix"
+SYSTEMD_DIR="/etc/systemd/system"
 
 if [[ $EUID -ne 0 ]]; then
     echo "Run as root: sudo ./install.sh" >&2
@@ -14,7 +19,7 @@ fi
 echo "=== Installing ASMedia USB mouse fix ==="
 echo ""
 
-# ── 1. Copy udev rules ────────────────────────────────────────────────────────
+# 1. Copy udev rules
 
 echo "Installing udev rules..."
 
@@ -26,13 +31,27 @@ done
 
 echo ""
 
-# ── 2. Reload udev ────────────────────────────────────────────────────────────
+# 2. Reload udev
 
 echo "Reloading udev rules..."
 udevadm control --reload-rules
 echo ""
 
-# ── 3. Power-cycle all connected USB mice ─────────────────────────────────────
+# 3. Install boot service
+
+echo "Installing boot service..."
+
+mkdir -p "$LIB_DIR"
+cp "$SCRIPTS_DIR/hid-powercycle.sh" "$LIB_DIR/hid-powercycle.sh"
+chmod +x "$LIB_DIR/hid-powercycle.sh"
+
+cp "$SERVICES_DIR/asmedia-usb-mouse-fix.service" "$SYSTEMD_DIR/asmedia-usb-mouse-fix.service"
+systemctl daemon-reload
+systemctl enable asmedia-usb-mouse-fix.service
+echo "  Enabled: asmedia-usb-mouse-fix.service"
+echo ""
+
+# 4. Power-cycle all connected USB mice
 #
 # The fix prevents the TT stall on fresh enumeration but cannot recover a mouse
 # that is already stuck. Deauthorizing and re-authorizing each mouse forces a
@@ -69,7 +88,7 @@ fi
 
 echo ""
 
-# ── 4. Verify ─────────────────────────────────────────────────────────────────
+# 5. Verify
 
 echo "=== Verification ==="
 echo ""
