@@ -1,8 +1,8 @@
 # ASMedia ASM1042A USB Mouse Fix for Linux
 
-Fixes USB mice that do not respond when connected through a monitor containing an **ASMedia ASM1042A** USB 3.0 host controller via **Thunderbolt 2**. The fix consists of a udev rule and a small boot service, requires no reboot on most systems, and works generically for any USB mouse without needing to know the mouse's vendor or product ID.
+Fixes USB mice that do not respond when connected through an LG UltraWide monitor via **Thunderbolt 2**, where the monitor's internal USB hub is hosted by an **ASMedia ASM1042A** xHCI controller. The fix consists of a udev rule and a small boot service, requires no reboot on most systems, and works generically for any USB mouse without needing to know the mouse's vendor or product ID.
 
-This issue has been observed on a **MacBook Pro 13" Early 2015 (MacBookPro12,1)** with an LG UltraWide monitor connected via Thunderbolt 2. Interestingly, connecting the same monitor to a desktop PC via its USB port works fine. The problem only appears when the monitor is connected via Thunderbolt 2, which points to the Thunderbolt bridge itself as a contributing factor rather than the ASMedia chip alone.
+This issue has been observed on a **MacBook Pro 13" Early 2015 (MacBookPro12,1)** with an LG UltraWide monitor connected via Thunderbolt 2. When the same monitor is connected via its USB port instead, the hub is hosted by the Intel xHCI controller and the mouse works fine. The ASMedia ASM1042A acts as the xHCI host controller when connected via Thunderbolt 2, and it does not recover from TT stalls on the interrupt endpoint the way the Intel controller does.
 
 What makes this even stranger is that plugging in an unrelated Logitech wireless receiver into the monitor suddenly makes any wired mouse work. The receiver has no connection to the wired mouse whatsoever. It prevents the problem, though why exactly is unclear. The additional USB traffic it puts on the controller might be the reason, but I am not sure.
 
@@ -22,11 +22,12 @@ What makes this even stranger is that plugging in an unrelated Logitech wireless
 
 ## Affected Hardware (Confirmed Setup)
 
-| Component           | Details                                                                                                                                                                                             |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| USB host controller | ASMedia ASM1042A, PCI ID `1b21:1142`, located inside an LG UltraWide monitor connected via Thunderbolt 2. The problem has not been reproduced with the same chip connected via USB on a desktop PC. |
-| Affected devices    | Any standard USB HID mouse (virtually all USB mice operate at Full-Speed, 12 Mbit/s, regardless of generation)                                                                                      |
-| Affected OS         | Confirmed on Fedora, CachyOS, Ubuntu and Pop!_OS (as of April 2026). Since it reproduces across distributions, the issue is likely in the Linux kernel itself rather than anything distro-specific. |
+| Component            | Details                                                                                                                                                                                             |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| xHCI host controller | ASMedia ASM1042A, `1b21:1142`. This is the host controller exposed by the monitor via Thunderbolt 2.                                                                                                |
+| Monitor hub          | LG Electronics, `043e:9a10`. This is the actual hub the mouse connects through. The same hub hosted by an Intel xHCI (via USB connection) works fine.                                               |
+| Affected devices     | Any standard USB HID mouse (virtually all USB mice operate at Full-Speed, 12 Mbit/s, regardless of generation)                                                                                      |
+| Affected OS          | Confirmed on Fedora, CachyOS, Ubuntu and Pop!_OS (as of April 2026). Since it reproduces across distributions, the issue is likely in the Linux kernel itself rather than anything distro-specific. |
 
 To check if your system has this controller:
 
@@ -44,19 +45,24 @@ You should see something like:
 
 ## Root Cause
 
-> **Note:** The following is a theory based on observed behavior, not a confirmed explanation.
+> **Note:** The following is partly theory and partly based on observed log data. Not everything is fully confirmed.
 
 USB mice operate at Full-Speed (12 Mbit/s). This is part of the USB 2.0 specification and is the standard speed for input devices. It applies to modern mice just as much as older ones.
 
 When a Full-Speed device is connected to a faster hub, the hub uses a component called a **Transaction Translator (TT)** to bridge the speed difference. All mouse input passes through the TT on its way to the host.
 
-The problem appears to be caused by a combination of two factors, neither of which alone seems to be enough to trigger it.
+The monitor contains an internal USB hub (`043e:9a10`). When connected via Thunderbolt 2, this hub is hosted by the **ASMedia ASM1042A** xHCI controller. When connected via USB, the same hub is hosted by the **Intel xHCI** controller built into the MacBook. The mouse works fine on Intel but not on ASMedia.
 
-The first factor is Linux's driver behavior. After a USB device finishes enumerating, the kernel's usbhid driver goes quiet if nothing in userspace has opened the device yet. There is a brief window before the desktop environment or input system opens `/dev/hidrawX`, during which no interrupt URBs are being submitted and the mouse's interrupt pipe is idle. On macOS and Windows, the driver might keep the interrupt pipe active from the moment the device enumerates, which would explain why the problem does not occur on those systems. But this alone cannot be the full explanation, because the same Linux idle window exists when the monitor's hub is connected via USB, and there the mouse works fine.
+Dynamic debug logs from the xhci_hcd driver show that in the broken state, the ASMedia controller reports repeated `Stalled endpoint` and `Hard-reset ep` messages on ep 0 (the control endpoint) while the mouse is being configured. Shortly after, the log shows this on ep 2 (the interrupt IN endpoint):
 
-The second factor is the Thunderbolt 2 bridge. When the monitor is connected via Thunderbolt 2, USB traffic is encapsulated in the Thunderbolt protocol, tunneled through the Thunderbolt controller, and handed off to the ASMedia chip on the other side. This tunneling may introduce additional latency or change the timing of how transactions reach the TT. The idle window that Linux creates might be longer or timed differently when going through the Thunderbolt bridge.
+```
+xhci_hcd 0000:0a:00.0: Split transaction error for slot 3 ep 2
+xhci_hcd 0000:0a:00.0: Hard-reset ep 2, slot 3
+```
 
-The theory is that only when both factors are present, the Linux idle window combined with the Thunderbolt 2 timing, does the ASMedia TT lock up. Once the interrupt pipe goes quiet under these conditions, the TT appears to stop delivering input for that endpoint silently. The controller still reports the endpoint as active, the kernel driver still submits URBs, everything looks normal, but no input ever arrives. The TT does not recover on its own, even after userspace opens the device.
+A split transaction error refers to a failure in the split transaction protocol, which is the mechanism by which the hub's Transaction Translator bridges full-speed traffic to the high-speed controller. Whether this means the TT itself is failing or whether the ASMedia controller is mishandling the response is not clear to me. The USB log captured when the monitor is connected via USB (Intel xHCI) shows no such error for the mouse.
+
+After enumeration, the usbhid driver stops submitting interrupt URBs if nothing in userspace has opened the device yet. There is a brief idle window before the desktop environment opens `/dev/hidrawX`. This idle condition may be what triggers the initial stall. On macOS and Windows, the driver might keep the interrupt pipe active from the moment of enumeration, which would explain why those systems are not affected. But this is not confirmed.
 
 ---
 
