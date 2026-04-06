@@ -4,7 +4,7 @@ Fixes USB mice that do not respond when connected through an LG UltraWide monito
 
 This issue has been observed on a **MacBook Pro 13" Early 2015 (MacBookPro12,1)** with an LG UltraWide monitor connected via Thunderbolt 2. When the same monitor is connected via its USB port instead, the hub is hosted by the Intel xHCI controller and the mouse works fine. The ASMedia ASM1042A acts as the xHCI host controller when connected via Thunderbolt 2, and it does not recover from TT stalls on the interrupt endpoint the way the Intel controller does.
 
-What makes this even stranger is that plugging in an unrelated Logitech wireless receiver into the monitor suddenly makes any wired mouse work. The receiver has no connection to the wired mouse whatsoever. It prevents the problem, though why exactly is unclear. The additional USB traffic it puts on the controller might be the reason, but I am not sure.
+What makes this even stranger is that plugging in an unrelated Logitech wireless receiver into the monitor suddenly makes any wired mouse work. The receiver has no connection to the wired mouse whatsoever. Dynamic debug logs confirm that the URB cancellation still happens even with the receiver plugged in, so the receiver does not prevent the cause. The mouse simply recovers from it in that case, for reasons that are not yet clear.
 
 ---
 
@@ -53,16 +53,9 @@ When a Full-Speed device is connected to a faster hub, the hub uses a component 
 
 The monitor contains an internal USB hub (`043e:9a10`). When connected via Thunderbolt 2, this hub is hosted by the **ASMedia ASM1042A** xHCI controller. When connected via USB, the same hub is hosted by the **Intel xHCI** controller built into the MacBook. The mouse works fine on Intel but not on ASMedia.
 
-Dynamic debug logs from the xhci_hcd driver show that in the broken state, the ASMedia controller reports repeated `Stalled endpoint` and `Hard-reset ep` messages on ep 0 (the control endpoint) while the mouse is being configured. Shortly after, the log shows this on ep 2 (the interrupt IN endpoint):
+Dynamic debug logs from the xhci_hcd driver show that in the broken state, the ASMedia controller reports repeated `Stalled endpoint` and `Hard-reset ep` messages on ep 0 (the control endpoint) while the mouse is being configured. Those eventually clear and the mouse is recognized. Shortly after, udev briefly opens and closes `/dev/hidrawX` before the desktop environment does. This causes usbhid to cancel the interrupt URB on ep 0x81. On the ASMedia ASM1042A, no new URB is submitted after this cancellation, so the mouse sits silently. This has been confirmed by a kernel developer who investigated the logs. The developer was not able to reproduce the issue on two ASM1042 (non-A) controllers, where the next URB is submitted and the mouse recovers. This suggests the bug is specific to the ASM1042A.
 
-```
-xhci_hcd 0000:0a:00.0: Split transaction error for slot 3 ep 2
-xhci_hcd 0000:0a:00.0: Hard-reset ep 2, slot 3
-```
-
-A split transaction error refers to a failure in the split transaction protocol, which is the mechanism by which the hub's Transaction Translator bridges full-speed traffic to the high-speed controller. Whether this means the TT itself is failing or whether the ASMedia controller is mishandling the response is not clear to me. The USB log captured when the monitor is connected via USB (Intel xHCI) shows no such error for the mouse.
-
-After enumeration, the usbhid driver stops submitting interrupt URBs if nothing in userspace has opened the device yet. There is a brief idle window before the desktop environment opens `/dev/hidrawX`. This idle condition may be what triggers the initial stall. On macOS and Windows, the driver might keep the interrupt pipe active from the moment of enumeration, which would explain why those systems are not affected. But this is not confirmed.
+On macOS and Windows, the driver likely keeps the interrupt pipe active from the moment of enumeration, which would explain why those systems are not affected. But this is not confirmed.
 
 ---
 
