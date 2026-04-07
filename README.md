@@ -4,7 +4,9 @@ Fixes USB mice that do not respond when connected through an LG UltraWide monito
 
 This issue has been observed on a **MacBook Pro 13" Early 2015 (MacBookPro12,1)** with an LG UltraWide monitor connected via Thunderbolt 2. When the same monitor is connected via its USB port instead, the hub is hosted by the Intel xHCI controller and the mouse works fine. The ASMedia ASM1042A acts as the xHCI host controller when connected via Thunderbolt 2, and it does not recover from TT stalls on the interrupt endpoint the way the Intel controller does.
 
-What makes this even stranger is that plugging in an unrelated Logitech wireless receiver into the monitor suddenly makes any wired mouse work. The receiver has no connection to the wired mouse whatsoever. Dynamic debug logs confirm that the URB cancellation still happens even with the receiver plugged in, so the receiver does not prevent the cause. The mouse simply recovers from it in that case, for reasons that are not yet clear.
+What makes this even stranger is that plugging in an unrelated Logitech wireless receiver into the monitor suddenly makes any wired mouse work. The receiver has no connection to the wired mouse whatsoever. Dynamic debug logs confirm that the URB cancellation still happens even with the receiver plugged in, so the receiver does not prevent the cause. The mouse simply recovers from it in that case. A possible explanation is that the receiver keeps the USB bus active in a way that changes the timing of how the ASM1042A processes the next URB submission, but this is not confirmed.
+
+The Logitech Lightspeed Receiver (046d:c539) also has three interfaces all polling at 1ms, yet it works without any workaround even on the ASMedia controller. The likely reason is that it is not handled by usbhid but by the logitech-djreceiver driver (hid-logitech-dj), which has its own hid_ll_driver with open and close callbacks that do nothing. When udev opens and closes the hidraw device, no URB is cancelled at the USB level, so the ASM1042A never encounters the broken state.
 
 ---
 
@@ -54,6 +56,8 @@ When a Full-Speed device is connected to a faster hub, the hub uses a component 
 The monitor contains an internal USB hub (`043e:9a10`). When connected via Thunderbolt 2, this hub is hosted by the **ASMedia ASM1042A** xHCI controller. When connected via USB, the same hub is hosted by the **Intel xHCI** controller built into the MacBook. The mouse works fine on Intel but not on ASMedia.
 
 Dynamic debug logs from the xhci_hcd driver show that in the broken state, the ASMedia controller reports repeated `Stalled endpoint` and `Hard-reset ep` messages on ep 0 (the control endpoint) while the mouse is being configured. Those eventually clear and the mouse is recognized. Shortly after, udev briefly opens and closes `/dev/hidrawX` before the desktop environment does. This causes usbhid to cancel the interrupt URB on ep 0x81. On the ASMedia ASM1042A, no new URB is submitted after this cancellation, so the mouse sits silently. This has been confirmed by a kernel developer who investigated the logs. The developer was not able to reproduce the issue on two ASM1042 (non-A) controllers, where the next URB is submitted and the mouse recovers. This suggests the bug is specific to the ASM1042A.
+
+Testing with patched kernels that force a fixed polling interval confirms that the interval plays a role. Forcing 10ms makes the mouse work without any workaround, while forcing 1ms reproduces the problem identically to the stock kernel. The udev workaround still fixes it at 1ms. This suggests the ASM1042A is more likely to fail the URB resubmission at 1ms than at 10ms, though I have no good explanation for why.
 
 On macOS and Windows, the driver likely keeps the interrupt pipe active from the moment of enumeration, which would explain why those systems are not affected. But this is not confirmed.
 
